@@ -1,4 +1,4 @@
-// models/Bill.js - MongoDB Bill model
+// models/Bill.js - Fixed to match frontend structure
 const mongoose = require('mongoose');
 
 const billSchema = new mongoose.Schema({
@@ -6,8 +6,10 @@ const billSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
-    index: true // Index for faster queries
+    index: true
   },
+  
+  // Frontend-compatible fields (primary)
   deviceName: {
     type: String,
     required: true,
@@ -25,11 +27,6 @@ const billSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
-  amount: {
-    type: Number,
-    required: true,
-    min: 0
-  },
   remarks: {
     type: String,
     trim: true,
@@ -40,9 +37,39 @@ const billSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  submittedAt: {
+    type: Date,
+    default: Date.now
+  },
+  
+  // Backend-compatible fields (for compatibility)
+  amount: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  description: {
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: 200
+  },
+  vendor: {
+    type: String,
+    trim: true,
+    maxlength: 100,
+    default: ''
+  },
+  notes: {
+    type: String,
+    trim: true,
+    maxlength: 1000,
+    default: ''
+  },
+  
   category: {
     type: String,
-    default: 'General',
+    default: 'Other',
     enum: [
       'General', 
       'Electronics', 
@@ -53,28 +80,29 @@ const billSchema = new mongoose.Schema({
       'Entertainment', 
       'Shopping', 
       'Services',
-      'Other'
+      'Other'  // Changed from 'other' to 'Other'
     ]
   },
   date: {
     type: Date,
     default: Date.now,
-    index: true // Index for date-based queries
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now,
     index: true
   },
-  updatedAt: {
-    type: Date,
-    default: Date.now
+  
+  // Store frontend-specific data for compatibility
+  frontendData: {
+    deviceName: String,
+    deviceNumber: String,
+    deviceCost: String,
+    remarks: String,
+    imageUri: String,
+    submittedAt: String
   }
 }, {
-  timestamps: true // Automatically manage createdAt and updatedAt
+  timestamps: true
 });
 
-// Compound index for efficient user-based queries
+// Compound indexes for efficient queries
 billSchema.index({ userId: 1, createdAt: -1 });
 billSchema.index({ userId: 1, category: 1 });
 billSchema.index({ userId: 1, date: -1 });
@@ -83,22 +111,46 @@ billSchema.index({ userId: 1, date: -1 });
 billSchema.index({
   deviceName: 'text',
   deviceNumber: 'text',
-  remarks: 'text'
+  remarks: 'text',
+  description: 'text',
+  vendor: 'text',
+  notes: 'text'
 });
 
-// Pre-save middleware to ensure amount and deviceCost are in sync
+// Pre-save middleware to ensure field consistency
 billSchema.pre('save', function(next) {
-  // If amount is not set but deviceCost is, sync them
+  // Sync deviceCost with amount
   if (!this.amount && this.deviceCost) {
     this.amount = this.deviceCost;
   }
-  // If deviceCost is not set but amount is, sync them
   if (!this.deviceCost && this.amount) {
     this.deviceCost = this.amount;
   }
   
-  // Update the updatedAt timestamp
-  this.updatedAt = new Date();
+  // Sync deviceName with description
+  if (!this.description && this.deviceName) {
+    this.description = this.deviceName;
+  }
+  if (!this.deviceName && this.description) {
+    this.deviceName = this.description;
+  }
+  
+  // Sync deviceNumber with vendor
+  if (!this.vendor && this.deviceNumber) {
+    this.vendor = this.deviceNumber;
+  }
+  if (!this.deviceNumber && this.vendor) {
+    this.deviceNumber = this.vendor;
+  }
+  
+  // Sync remarks with notes
+  if (!this.notes && this.remarks) {
+    this.notes = this.remarks;
+  }
+  if (!this.remarks && this.notes) {
+    this.remarks = this.notes;
+  }
+  
   next();
 });
 
