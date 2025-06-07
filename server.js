@@ -7,6 +7,14 @@ require('dotenv').config();
 
 console.log('MONGODB_URI:', process.env.MONGODB_URI);
 console.log('Environment loaded:', !!process.env.MONGODB_URI);
+
+const app = express();
+
+// Middleware
+app.use(express.json({ limit: '10mb' })); // Increase limit for image uploads
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(cors());
+
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/billapp', {
   useNewUrlParser: true,
@@ -17,18 +25,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/billapp',
 })
 .catch((err) => {
   console.error('❌ MongoDB connection error:', err.message);
-});
-
-const app = express();
-
-// Middleware
-app.use(express.json());
-app.use(cors());
-
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/billapp', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
+  process.exit(1);
 });
 
 // User Schema
@@ -56,36 +53,106 @@ const userSchema = new mongoose.Schema({
   }
 });
 
-// Bill Schema (for future use)
+// Updated Bill Schema to match your frontend structure
 const billSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true
+    required: true,
+    index: true
   },
-  category: {
+  deviceName: {
     type: String,
     required: true,
-    enum: ['electronics', 'travel', 'food', 'utilities', 'healthcare', 'other']
+    trim: true,
+    maxlength: 200
+  },
+  deviceNumber: {
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: 100
+  },
+  deviceCost: {
+    type: Number,
+    required: true,
+    min: 0
   },
   amount: {
     type: Number,
-    required: true
+    required: true,
+    min: 0
   },
-  description: {
+  remarks: {
     type: String,
-    required: true
+    trim: true,
+    maxlength: 1000,
+    default: ''
+  },
+  imageUri: {
+    type: String,
+    default: null
+  },
+  category: {
+    type: String,
+    default: 'General',
+    enum: [
+      'General', 
+      'Electronics', 
+      'Utilities', 
+      'Food', 
+      'Transportation', 
+      'Healthcare', 
+      'Entertainment', 
+      'Shopping', 
+      'Services',
+      'Other'
+    ]
   },
   date: {
     type: Date,
-    required: true
+    default: Date.now,
+    index: true
   },
-  vendor: String,
-  notes: String,
+  submittedAt: {
+    type: Date,
+    default: Date.now
+  },
   createdAt: {
+    type: Date,
+    default: Date.now,
+    index: true
+  },
+  updatedAt: {
     type: Date,
     default: Date.now
   }
+}, {
+  timestamps: true
+});
+
+// Compound indexes for efficient queries
+billSchema.index({ userId: 1, createdAt: -1 });
+billSchema.index({ userId: 1, category: 1 });
+billSchema.index({ userId: 1, date: -1 });
+
+// Text index for search functionality
+billSchema.index({
+  deviceName: 'text',
+  deviceNumber: 'text',
+  remarks: 'text'
+});
+
+// Pre-save middleware to ensure amount and deviceCost are in sync
+billSchema.pre('save', function(next) {
+  if (!this.amount && this.deviceCost) {
+    this.amount = this.deviceCost;
+  }
+  if (!this.deviceCost && this.amount) {
+    this.deviceCost = this.amount;
+  }
+  this.updatedAt = new Date();
+  next();
 });
 
 const User = mongoose.model('User', userSchema);
@@ -112,16 +179,16 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Routes
+// AUTH ROUTES
 
 // Register User
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { email, password, name } = req.body;
+    const { email, password, name, username } = req.body;
 
     // Validation
-    if (!email || !password || !name) {
-      return res.status(400).json({ error: 'All fields are required' });
+    if (!email || !password || (!name && !username)) {
+      return res.status(400).json({ error: 'Email, password, and name are required' });
     }
 
     if (password.length < 6) {
@@ -142,7 +209,7 @@ app.post('/api/auth/register', async (req, res) => {
     const user = new User({
       email,
       password: hashedPassword,
-      name
+      name: name || username
     });
 
     await user.save();
@@ -227,7 +294,7 @@ app.get('/api/auth/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Bills CRUD Operations
+// BILL ROUTES
 
 // Get all bills for authenticated user
 app.get('/api/bills', authenticateToken, async (req, res) => {
@@ -243,68 +310,131 @@ app.get('/api/bills', authenticateToken, async (req, res) => {
 // Create a new bill
 app.post('/api/bills', authenticateToken, async (req, res) => {
   try {
-    const { category, amount, description, date, vendor, notes } = req.body;
+    const {
+      deviceName,
+      deviceNumber,
+      deviceCost,
+      amount,
+      remarks,
+      imageUri,
+      category,
+      date,
+      submittedAt
+    } = req.body;
 
-    if (!category || !amount || !description || !date) {
-      return res.status(400).json({ error: 'Category, amount, description, and date are required' });
+    // Validation
+    if (!deviceName || !deviceNumber || (!deviceCost && !amount)) {
+      return res.status(400).json({ 
+        message: 'Device name, number, and cost are required' 
+      });
+    }
+
+    const billAmount = amount || deviceCost;
+    if (isNaN(billAmount) || billAmount <= 0) {
+      return res.status(400).json({ 
+        message: 'Please provide a valid amount' 
+      });
     }
 
     const bill = new Bill({
       userId: req.user.userId,
-      category,
-      amount,
-      description,
-      date,
-      vendor,
-      notes
+      deviceName: deviceName.trim(),
+      deviceNumber: deviceNumber.trim(),
+      deviceCost: parseFloat(billAmount),
+      amount: parseFloat(billAmount),
+      remarks: remarks ? remarks.trim() : '',
+      imageUri: imageUri || null,
+      category: category || 'General',
+      date: date ? new Date(date) : new Date(),
+      submittedAt: submittedAt ? new Date(submittedAt) : new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date()
     });
 
-    await bill.save();
-    res.status(201).json({ message: 'Bill created successfully', bill });
+    const savedBill = await bill.save();
+    res.status(201).json({ 
+      message: 'Bill created successfully', 
+      bill: savedBill 
+    });
   } catch (error) {
     console.error('Create bill error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
 // Update a bill
 app.put('/api/bills/:id', authenticateToken, async (req, res) => {
   try {
-    const { category, amount, description, date, vendor, notes } = req.body;
-    
-    const bill = await Bill.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user.userId },
-      { category, amount, description, date, vendor, notes },
-      { new: true }
-    );
+    const { id } = req.params;
+    const {
+      deviceName,
+      deviceNumber,
+      deviceCost,
+      amount,
+      remarks,
+      imageUri,
+      category,
+      date
+    } = req.body;
 
+    // Find bill and verify ownership
+    const bill = await Bill.findById(id);
     if (!bill) {
-      return res.status(404).json({ error: 'Bill not found' });
+      return res.status(404).json({ message: 'Bill not found' });
     }
 
-    res.json({ message: 'Bill updated successfully', bill });
+    if (bill.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Update fields
+    if (deviceName) bill.deviceName = deviceName.trim();
+    if (deviceNumber) bill.deviceNumber = deviceNumber.trim();
+    
+    const billAmount = amount || deviceCost;
+    if (billAmount && !isNaN(billAmount) && billAmount > 0) {
+      bill.deviceCost = parseFloat(billAmount);
+      bill.amount = parseFloat(billAmount);
+    }
+    
+    if (remarks !== undefined) bill.remarks = remarks.trim();
+    if (imageUri !== undefined) bill.imageUri = imageUri;
+    if (category) bill.category = category;
+    if (date) bill.date = new Date(date);
+    
+    bill.updatedAt = new Date();
+
+    const updatedBill = await bill.save();
+    res.json({ 
+      message: 'Bill updated successfully', 
+      bill: updatedBill 
+    });
   } catch (error) {
     console.error('Update bill error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
 // Delete a bill
 app.delete('/api/bills/:id', authenticateToken, async (req, res) => {
   try {
-    const bill = await Bill.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user.userId
-    });
+    const { id } = req.params;
 
+    // Find bill and verify ownership
+    const bill = await Bill.findById(id);
     if (!bill) {
-      return res.status(404).json({ error: 'Bill not found' });
+      return res.status(404).json({ message: 'Bill not found' });
     }
 
+    if (bill.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    await Bill.findByIdAndDelete(id);
     res.json({ message: 'Bill deleted successfully' });
   } catch (error) {
     console.error('Delete bill error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
@@ -314,30 +444,85 @@ app.get('/api/bills/search', authenticateToken, async (req, res) => {
     const { query, category, startDate, endDate } = req.query;
     let searchCriteria = { userId: req.user.userId };
 
+    // Text search
     if (query) {
       searchCriteria.$or = [
-        { description: { $regex: query, $options: 'i' } },
-        { vendor: { $regex: query, $options: 'i' } },
-        { notes: { $regex: query, $options: 'i' } }
+        { deviceName: { $regex: query, $options: 'i' } },
+        { deviceNumber: { $regex: query, $options: 'i' } },
+        { remarks: { $regex: query, $options: 'i' } }
       ];
     }
 
+    // Category filter
     if (category && category !== 'all') {
       searchCriteria.category = category;
     }
 
-    if (startDate && endDate) {
-      searchCriteria.date = {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate)
-      };
+    // Date range filter
+    if (startDate || endDate) {
+      searchCriteria.date = {};
+      if (startDate) {
+        searchCriteria.date.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        searchCriteria.date.$lte = new Date(endDate);
+      }
     }
 
     const bills = await Bill.find(searchCriteria).sort({ createdAt: -1 });
     res.json({ bills });
   } catch (error) {
     console.error('Search bills error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get bill statistics
+app.get('/api/bills/stats', authenticateToken, async (req, res) => {
+  try {
+    const bills = await Bill.find({ userId: req.user.userId });
+    
+    // Calculate totals by category
+    const categoryTotals = {};
+    let totalAmount = 0;
+    
+    bills.forEach(bill => {
+      const category = bill.category || 'General';
+      const amount = bill.amount || bill.deviceCost || 0;
+      
+      if (categoryTotals[category]) {
+        categoryTotals[category] += amount;
+      } else {
+        categoryTotals[category] = amount;
+      }
+      
+      totalAmount += amount;
+    });
+
+    // Calculate monthly totals
+    const monthlyTotals = {};
+    bills.forEach(bill => {
+      const date = new Date(bill.date || bill.createdAt);
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      const amount = bill.amount || bill.deviceCost || 0;
+      
+      if (monthlyTotals[monthKey]) {
+        monthlyTotals[monthKey] += amount;
+      } else {
+        monthlyTotals[monthKey] = amount;
+      }
+    });
+
+    res.json({
+      totalBills: bills.length,
+      totalAmount,
+      categoryTotals,
+      monthlyTotals,
+      averageAmount: bills.length > 0 ? totalAmount / bills.length : 0
+    });
+  } catch (error) {
+    console.error('Get stats error:', error);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
@@ -346,7 +531,21 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Server is running' });
 });
 
+// Global error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Global error handler:', err);
+  res.status(500).json({ 
+    message: 'Something went wrong!', 
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error' 
+  });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ message: 'Route not found' });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`🚀 Server is running on port ${PORT}`);
 });
