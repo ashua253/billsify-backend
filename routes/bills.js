@@ -1,247 +1,256 @@
-// routes/bills.js - Fixed version with proper imports
+// routes/bills.js - Fixed validation logic
 const express = require('express');
 const router = express.Router();
 const Bill = require('../models/Bill');
-const authenticateToken = require('../middleware/auth'); // Fixed import
+const authenticateToken = require('../middleware/auth');
 
 // GET /api/bills - Get all bills for authenticated user
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const bills = await Bill.find({ userId: req.user.userId }).sort({ createdAt: -1 });
-    res.json({ bills });
+    
+    // Transform bills for frontend compatibility
+    const transformedBills = bills.map(bill => ({
+      _id: bill._id,
+      deviceName: bill.frontendData?.deviceName || bill.description,
+      deviceNumber: bill.frontendData?.deviceNumber || bill.vendor,
+      deviceCost: bill.frontendData?.deviceCost || bill.amount.toString(),
+      remarks: bill.frontendData?.remarks || bill.notes,
+      imageUri: bill.frontendData?.imageUri || null,
+      submittedAt: bill.frontendData?.submittedAt || bill.date,
+      // Keep backend fields for compatibility
+      category: bill.category,
+      amount: bill.amount,
+      description: bill.description,
+      date: bill.date,
+      createdAt: bill.createdAt
+    }));
+    
+    res.json({ bills: transformedBills });
   } catch (error) {
     console.error('Get bills error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// POST /api/bills - Create a new bill
+// POST /api/bills - Create a new bill - FIXED VERSION
 router.post('/', authenticateToken, async (req, res) => {
   try {
-    const {
-      deviceName,
-      deviceNumber,
-      deviceCost,
-      amount,
-      remarks,
-      imageUri,
-      category,
-      date,
-      frontendData
-    } = req.body;
+    console.log('📥 Received bill data:', req.body); // Debug log
+    
+    const { category, amount, description, date, vendor, notes, frontendData } = req.body;
 
-    // Validation
-    if (!deviceName || !deviceNumber || (!deviceCost && !amount)) {
-      return res.status(400).json({ 
-        message: 'Device name, number, and cost are required' 
-      });
-    }
+    // Handle both frontend and backend data structures
+    const billAmount = amount || (frontendData?.deviceCost ? parseFloat(frontendData.deviceCost) : 0);
+    const billDescription = description || frontendData?.deviceName || 'Unknown Device';
+    const billDate = date || frontendData?.submittedAt || new Date().toISOString();
 
-    const billAmount = amount || deviceCost;
-    if (isNaN(billAmount) || billAmount <= 0) {
-      return res.status(400).json({ 
-        message: 'Please provide a valid amount' 
-      });
+    console.log('🔍 Processed fields:', { billAmount, billDescription, billDate }); // Debug log
+
+    // FIXED VALIDATION - Check the processed values, not the original fields
+    if (!billDescription || billAmount <= 0) {
+      console.log('❌ Validation failed:', { billDescription, billAmount });
+      return res.status(400).json({ error: 'Description and valid amount are required' });
     }
 
     const bill = new Bill({
-      userId: req.user.userId, // From JWT middleware
-      deviceName: deviceName.trim(),
-      deviceNumber: deviceNumber.trim(),
-      deviceCost: parseFloat(billAmount),
-      amount: parseFloat(billAmount),
-      remarks: remarks ? remarks.trim() : '',
-      imageUri: imageUri || null,
-      category: category || 'General',
-      date: date ? new Date(date) : new Date(),
-      // Store frontend-specific data
+      userId: req.user.userId,
+      category: category || 'other',
+      amount: billAmount,
+      description: billDescription,
+      date: new Date(billDate),
+      vendor: vendor || frontendData?.deviceNumber || '',
+      notes: notes || frontendData?.remarks || '',
       frontendData: frontendData || {
-        deviceName: deviceName.trim(),
-        deviceNumber: deviceNumber.trim(),
+        deviceName: billDescription,
+        deviceNumber: vendor || '',
         deviceCost: billAmount.toString(),
-        remarks: remarks || '',
-        imageUri: imageUri || null,
-        submittedAt: new Date().toISOString()
+        remarks: notes || '',
+        imageUri: null,
+        submittedAt: billDate
       }
     });
 
-    const savedBill = await bill.save();
+    console.log('💾 Saving bill:', bill); // Debug log
+
+    await bill.save();
+    
+    // Return transformed bill for frontend
+    const transformedBill = {
+      _id: bill._id,
+      deviceName: bill.frontendData?.deviceName || bill.description,
+      deviceNumber: bill.frontendData?.deviceNumber || bill.vendor,
+      deviceCost: bill.frontendData?.deviceCost || bill.amount.toString(),
+      remarks: bill.frontendData?.remarks || bill.notes,
+      imageUri: bill.frontendData?.imageUri || null,
+      submittedAt: bill.frontendData?.submittedAt || bill.date,
+      category: bill.category,
+      amount: bill.amount,
+      description: bill.description,
+      date: bill.date,
+      createdAt: bill.createdAt
+    };
+    
+    console.log('✅ Bill created successfully:', transformedBill._id);
+    
     res.status(201).json({ 
       message: 'Bill created successfully', 
-      bill: savedBill 
+      bill: transformedBill 
     });
   } catch (error) {
-    console.error('Create bill error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('❌ Create bill error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // PUT /api/bills/:id - Update a bill
 router.put('/:id', authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
-    const {
-      deviceName,
-      deviceNumber,
-      deviceCost,
-      amount,
-      remarks,
-      imageUri,
-      category,
-      date,
-      frontendData
-    } = req.body;
+    const { category, amount, description, date, vendor, notes, frontendData } = req.body;
+    
+    const updateData = {
+      category: category || 'other',
+      amount: amount || (frontendData?.deviceCost ? parseFloat(frontendData.deviceCost) : 0),
+      description: description || frontendData?.deviceName || 'Unknown Device',
+      date: new Date(date || frontendData?.submittedAt || new Date()),
+      vendor: vendor || frontendData?.deviceNumber || '',
+      notes: notes || frontendData?.remarks || '',
+      frontendData: frontendData
+    };
+    
+    const bill = await Bill.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user.userId },
+      updateData,
+      { new: true }
+    );
 
-    // Find bill and verify ownership
-    const bill = await Bill.findById(id);
     if (!bill) {
-      return res.status(404).json({ message: 'Bill not found' });
+      return res.status(404).json({ error: 'Bill not found' });
     }
 
-    if (bill.userId.toString() !== req.user.userId) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
+    // Return transformed bill for frontend
+    const transformedBill = {
+      _id: bill._id,
+      deviceName: bill.frontendData?.deviceName || bill.description,
+      deviceNumber: bill.frontendData?.deviceNumber || bill.vendor,
+      deviceCost: bill.frontendData?.deviceCost || bill.amount.toString(),
+      remarks: bill.frontendData?.remarks || bill.notes,
+      imageUri: bill.frontendData?.imageUri || null,
+      submittedAt: bill.frontendData?.submittedAt || bill.date,
+      category: bill.category,
+      amount: bill.amount,
+      description: bill.description,
+      date: bill.date,
+      createdAt: bill.createdAt
+    };
 
-    // Update fields
-    if (deviceName) bill.deviceName = deviceName.trim();
-    if (deviceNumber) bill.deviceNumber = deviceNumber.trim();
-    
-    const billAmount = amount || deviceCost;
-    if (billAmount && !isNaN(billAmount) && billAmount > 0) {
-      bill.deviceCost = parseFloat(billAmount);
-      bill.amount = parseFloat(billAmount);
-    }
-    
-    if (remarks !== undefined) bill.remarks = remarks.trim();
-    if (imageUri !== undefined) bill.imageUri = imageUri;
-    if (category) bill.category = category;
-    if (date) bill.date = new Date(date);
-    if (frontendData) bill.frontendData = frontendData;
-
-    const updatedBill = await bill.save();
     res.json({ 
       message: 'Bill updated successfully', 
-      bill: updatedBill 
+      bill: transformedBill 
     });
   } catch (error) {
     console.error('Update bill error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // DELETE /api/bills/:id - Delete a bill
 router.delete('/:id', authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
+    const bill = await Bill.findOneAndDelete({
+      _id: req.params.id,
+      userId: req.user.userId
+    });
 
-    // Find bill and verify ownership
-    const bill = await Bill.findById(id);
     if (!bill) {
-      return res.status(404).json({ message: 'Bill not found' });
+      return res.status(404).json({ error: 'Bill not found' });
     }
 
-    if (bill.userId.toString() !== req.user.userId) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
-
-    await Bill.findByIdAndDelete(id);
     res.json({ message: 'Bill deleted successfully' });
   } catch (error) {
     console.error('Delete bill error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /api/bills/search - Search bills
+// GET /api/bills/search - Search bills with frontend compatibility
 router.get('/search', authenticateToken, async (req, res) => {
   try {
     const { query, category, startDate, endDate } = req.query;
     let searchCriteria = { userId: req.user.userId };
 
-    // Text search
     if (query) {
       searchCriteria.$or = [
-        { deviceName: { $regex: query, $options: 'i' } },
-        { deviceNumber: { $regex: query, $options: 'i' } },
-        { remarks: { $regex: query, $options: 'i' } },
+        { description: { $regex: query, $options: 'i' } },
+        { vendor: { $regex: query, $options: 'i' } },
+        { notes: { $regex: query, $options: 'i' } },
         { 'frontendData.deviceName': { $regex: query, $options: 'i' } },
         { 'frontendData.deviceNumber': { $regex: query, $options: 'i' } },
         { 'frontendData.remarks': { $regex: query, $options: 'i' } }
       ];
     }
 
-    // Category filter
     if (category && category !== 'all') {
       searchCriteria.category = category;
     }
 
-    // Date range filter
-    if (startDate || endDate) {
-      searchCriteria.date = {};
-      if (startDate) {
-        searchCriteria.date.$gte = new Date(startDate);
-      }
-      if (endDate) {
-        searchCriteria.date.$lte = new Date(endDate);
-      }
+    if (startDate && endDate) {
+      searchCriteria.date = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate)
+      };
     }
 
     const bills = await Bill.find(searchCriteria).sort({ createdAt: -1 });
-    res.json({ bills });
+    
+    // Transform bills for frontend compatibility
+    const transformedBills = bills.map(bill => ({
+      _id: bill._id,
+      deviceName: bill.frontendData?.deviceName || bill.description,
+      deviceNumber: bill.frontendData?.deviceNumber || bill.vendor,
+      deviceCost: bill.frontendData?.deviceCost || bill.amount.toString(),
+      remarks: bill.frontendData?.remarks || bill.notes,
+      imageUri: bill.frontendData?.imageUri || null,
+      submittedAt: bill.frontendData?.submittedAt || bill.date,
+      category: bill.category,
+      amount: bill.amount,
+      description: bill.description,
+      date: bill.date,
+      createdAt: bill.createdAt
+    }));
+    
+    res.json({ bills: transformedBills });
   } catch (error) {
     console.error('Search bills error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /api/bills/stats - Get bill statistics
+// GET /api/bills/stats - Get bills statistics
 router.get('/stats', authenticateToken, async (req, res) => {
   try {
     const bills = await Bill.find({ userId: req.user.userId });
     
-    // Calculate totals by category
-    const categoryTotals = {};
-    let totalAmount = 0;
-    
-    bills.forEach(bill => {
-      const category = bill.category || 'General';
-      const amount = bill.amount || bill.deviceCost || 0;
-      
-      if (categoryTotals[category]) {
-        categoryTotals[category] += amount;
-      } else {
-        categoryTotals[category] = amount;
-      }
-      
-      totalAmount += amount;
-    });
+    const stats = {
+      totalBills: bills.length,
+      totalAmount: bills.reduce((sum, bill) => sum + bill.amount, 0),
+      categoryBreakdown: {},
+      monthlySpending: {}
+    };
 
-    // Calculate monthly totals
-    const monthlyTotals = {};
+    // Calculate category breakdown
     bills.forEach(bill => {
-      const date = new Date(bill.date || bill.createdAt);
-      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-      const amount = bill.amount || bill.deviceCost || 0;
-      
-      if (monthlyTotals[monthKey]) {
-        monthlyTotals[monthKey] += amount;
+      if (stats.categoryBreakdown[bill.category]) {
+        stats.categoryBreakdown[bill.category] += bill.amount;
       } else {
-        monthlyTotals[monthKey] = amount;
+        stats.categoryBreakdown[bill.category] = bill.amount;
       }
     });
 
-    res.json({
-      stats: {
-        totalBills: bills.length,
-        totalAmount,
-        categoryTotals,
-        monthlyTotals,
-        averageAmount: bills.length > 0 ? totalAmount / bills.length : 0
-      }
-    });
+    res.json({ stats });
   } catch (error) {
-    console.error('Get stats error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Stats error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
