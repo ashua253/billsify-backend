@@ -220,16 +220,16 @@ router.get('/search', authenticateToken, async (req, res) => {
   try {
     const { query, billType, startDate, endDate, minAmount, maxAmount } = req.query;
     
-    const searchParams = {
-      query,
-      billType,
-      startDate,
-      endDate,
-      minAmount: minAmount ? parseFloat(minAmount) : undefined,
-      maxAmount: maxAmount ? parseFloat(maxAmount) : undefined
-    };
+    // Clean up search params (remove undefined values)
+    const searchParams = {};
+    if (query && query.trim()) searchParams.query = query.trim();
+    if (billType && billType !== 'all') searchParams.billType = billType;
+    if (startDate) searchParams.startDate = startDate;
+    if (endDate) searchParams.endDate = endDate;
+    if (minAmount && !isNaN(parseFloat(minAmount))) searchParams.minAmount = parseFloat(minAmount);
+    if (maxAmount && !isNaN(parseFloat(maxAmount))) searchParams.maxAmount = parseFloat(maxAmount);
 
-    console.log('🔍 OCR enhanced search with params:', searchParams);
+    console.log('🔍 OCR enhanced search with cleaned params:', searchParams);
     
     const bills = await Bill.searchBillsWithOCR(req.user.userId, searchParams);
     
