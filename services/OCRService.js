@@ -1,238 +1,357 @@
-// services/OCRService.js - Updated for Render deployment compatibility
-const vision = require('@google-cloud/vision');
+// routes/ocr.js - Complete OCR processing endpoints with mongoose import fix
+const express = require('express');
+const multer = require('multer');
+const mongoose = require('mongoose'); // ← CRITICAL FIX: Added missing mongoose import
+const router = express.Router();
+const Bill = require('../models/Bill');
+const OCRService = require('../services/OCRService');
+const authenticateToken = require('../middleware/auth');
 
-class OCRService {
-  constructor() {
-    // Initialize Google Cloud Vision client with flexible credential handling
-    this.client = this.initializeVisionClient();
-  }
-
-  initializeVisionClient() {
-    try {
-      let clientConfig = {
-        projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
-      };
-
-      // Method 1: For Render/Production - Use JSON from environment variable
-      if (process.env.GOOGLE_CLOUD_CREDENTIALS_JSON) {
-        console.log('🔑 Using Google Cloud credentials from environment variable');
-        
-        try {
-          const credentials = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS_JSON);
-          clientConfig.credentials = credentials;
-        } catch (parseError) {
-          throw new Error(`Failed to parse Google Cloud credentials JSON: ${parseError.message}`);
-        }
-        
-      } 
-      // Method 2: For Local Development - Use file path
-      else if (process.env.GOOGLE_CLOUD_KEY_FILE) {
-        console.log('🔑 Using Google Cloud credentials from file:', process.env.GOOGLE_CLOUD_KEY_FILE);
-        clientConfig.keyFilename = process.env.GOOGLE_CLOUD_KEY_FILE;
-        
-      } 
-      // Method 3: No credentials found
-      else {
-        throw new Error('No Google Cloud credentials found. Set either GOOGLE_CLOUD_CREDENTIALS_JSON or GOOGLE_CLOUD_KEY_FILE environment variable');
-      }
-
-      return new vision.ImageAnnotatorClient(clientConfig);
-      
-    } catch (error) {
-      console.error('❌ Failed to initialize Google Cloud Vision client:', error.message);
-      throw error;
+// Configure multer for image uploads
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept only image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'), false);
     }
   }
+});
 
-  // Main method to process bill image and extract structured data
-  async processBillImage(imageBuffer, mimeType = 'image/jpeg') {
-    try {
-      console.log('🔍 Starting OCR processing for bill image...');
-      
-      // Step 1: Extract text from image
-      const extractedText = await this.extractTextFromImage(imageBuffer, mimeType);
-      
-      // Step 2: Parse text to identify bill structure
-      const structuredData = await this.parseExtractedText(extractedText);
-      
-      console.log('✅ OCR processing completed successfully');
-      return {
-        success: true,
-        extractedData: structuredData,
-        rawText: extractedText.fullText,
-        confidence: extractedText.confidence
-      };
-      
-    } catch (error) {
-      console.error('❌ OCR processing failed:', error);
-      return {
-        success: false,
-        error: error.message,
-        extractedData: null
-      };
-    }
-  }
-
-  // Extract text using Google Cloud Vision API
-  async extractTextFromImage(imageBuffer, mimeType) {
-    try {
-      const request = {
-        image: {
-          content: imageBuffer.toString('base64'),
-        },
-        features: [
-          { type: 'TEXT_DETECTION' },
-          { type: 'DOCUMENT_TEXT_DETECTION' }
-        ],
-      };
-
-      const [result] = await this.client.annotateImage(request);
-      const detections = result.textAnnotations;
-      
-      if (!detections || detections.length === 0) {
-        throw new Error('No text detected in the image');
-      }
-
-      // Get full text and individual words with positions
-      const fullText = detections[0].description;
-      const words = detections.slice(1).map(detection => ({
-        text: detection.description,
-        confidence: detection.confidence || 0.8,
-        bounds: detection.boundingPoly
-      }));
-
-      return {
-        fullText,
-        words,
-        confidence: this.calculateOverallConfidence(words)
-      };
-      
-    } catch (error) {
-      console.error('Google Vision API error:', error);
-      throw new Error(`OCR extraction failed: ${error.message}`);
-    }
-  }
-
-  // Parse extracted text to identify bill components
-  async parseExtractedText(extractedText) {
-    const text = extractedText.fullText.toLowerCase();
-    const lines = extractedText.fullText.split('\n').map(line => line.trim()).filter(line => line);
+// POST /api/ocr/process-image - Process image and extract bill data
+router.post('/process-image', authenticateToken, upload.single('billImage'), async (req, res) => {
+  try {
+    console.log('📥 OCR processing request received');
     
-    const structuredData = {
-      billType: this.identifyBillType(text),
-      vendor: this.extractVendorInfo(lines),
-      billNumber: this.extractBillNumber(lines),
-      billDate: this.extractBillDate(lines),
-      dueDate: this.extractDueDate(lines),
-      totalAmount: this.extractTotalAmount(lines),
-      currency: this.extractCurrency(text),
-      items: this.extractLineItems(lines),
-      paymentDetails: this.extractPaymentDetails(lines),
-      utilityData: this.extractUtilityData(lines, text),
-      rawText: extractedText.fullText,
-      confidence: extractedText.confidence,
-      processingDate: new Date()
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    console.log('📷 Image details:', {
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      size: req.file.size
+    });
+
+    // Process image with OCR
+    console.log('🔍 Starting OCR processing...');
+    const ocrResult = await OCRService.processBillImage(req.file.buffer, req.file.mimetype);
+    
+    if (!ocrResult.success) {
+      console.error('❌ OCR processing failed:', ocrResult.error);
+      return res.status(500).json({ 
+        error: 'OCR processing failed',
+        details: ocrResult.error 
+      });
+    }
+
+    console.log('✅ OCR processing completed successfully');
+    console.log('📊 Extracted data summary:', {
+      billType: ocrResult.extractedData.billType,
+      vendor: ocrResult.extractedData.vendor?.name,
+      amount: ocrResult.extractedData.totalAmount,
+      confidence: ocrResult.confidence
+    });
+
+    // Return extracted data for review
+    res.json({
+      success: true,
+      message: 'OCR processing completed',
+      extractedData: ocrResult.extractedData,
+      confidence: ocrResult.confidence,
+      suggestions: {
+        needsReview: ocrResult.confidence < 0.7,
+        reviewFields: ocrResult.confidence < 0.7 ? ['totalAmount', 'billDate', 'vendor'] : []
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ OCR endpoint error:', error);
+    
+    // Handle specific errors
+    if (error.message.includes('Only image files')) {
+      return res.status(400).json({ error: 'Please upload a valid image file' });
+    }
+    
+    if (error.message.includes('File too large')) {
+      return res.status(400).json({ error: 'Image file is too large. Please upload an image smaller than 10MB' });
+    }
+    
+    res.status(500).json({ 
+      error: 'OCR processing failed',
+      details: error.message 
+    });
+  }
+});
+
+// POST /api/ocr/create-bill - Create bill with OCR extracted data
+router.post('/create-bill', authenticateToken, async (req, res) => {
+  try {
+    console.log('📥 Creating bill with OCR data...');
+    
+    const { extractedData, userConfirmedData, imageUri } = req.body;
+    
+    if (!extractedData) {
+      return res.status(400).json({ error: 'Extracted data is required' });
+    }
+
+    // Merge extracted data with user confirmed data
+    const finalData = {
+      ...extractedData,
+      ...userConfirmedData // User can override any extracted data
     };
 
-    return structuredData;
-  }
+    console.log('🔍 Final bill data:', {
+      billType: finalData.billType,
+      vendor: finalData.vendor?.name,
+      amount: finalData.totalAmount
+    });
 
-  // Helper methods for text parsing
-  identifyBillType(text) {
-    const billTypePatterns = {
-      'electricity': ['electricity', 'power', 'electric', 'kwh', 'units consumed', 'meter reading'],
-      'water': ['water', 'municipal', 'water board', 'water supply'],
-      'gas': ['gas', 'lpg', 'petroleum', 'cylinder'],
-      'internet': ['internet', 'broadband', 'wifi', 'data', 'mbps'],
-      'mobile': ['mobile', 'phone', 'cellular', 'telecom', 'airtime'],
-      'credit_card': ['credit card', 'statement', 'minimum due', 'credit limit'],
-      'shopping': ['invoice', 'receipt', 'purchase', 'retail', 'store'],
-      'restaurant': ['restaurant', 'cafe', 'food', 'dining', 'menu'],
-      'medical': ['medical', 'hospital', 'clinic', 'pharmacy', 'prescription'],
-      'insurance': ['insurance', 'policy', 'premium', 'coverage']
+    // Create bill with OCR data
+    const bill = new Bill({
+      userId: req.user.userId,
+      
+      // Mark as OCR processed
+      ocrProcessed: true,
+      ocrConfidence: finalData.confidence || 0,
+      
+      // Store structured extracted data
+      extractedData: finalData,
+      
+      // Set main fields from extracted data
+      amount: finalData.totalAmount || 0,
+      description: finalData.vendor?.name || 'Unknown Vendor',
+      vendor: finalData.vendor?.name || '',
+      notes: finalData.rawText ? finalData.rawText.substring(0, 500) : '',
+      category: finalData.billType === 'electricity' ? 'Utilities' : 
+                finalData.billType === 'shopping' ? 'Shopping' : 
+                finalData.billType === 'restaurant' ? 'Food' : 
+                finalData.billType === 'mobile' ? 'Services' :
+                finalData.billType === 'internet' ? 'Services' : 'Other',
+      date: finalData.billDate || new Date(),
+      
+      // Store image URI
+      imageUri: imageUri,
+      
+      // Backward compatibility fields
+      deviceName: finalData.vendor?.name || 'OCR Processed Bill',
+      deviceNumber: finalData.billNumber || '',
+      deviceCost: finalData.totalAmount || 0,
+      remarks: `OCR processed - ${finalData.billType} bill`,
+      submittedAt: new Date(),
+      
+      // Store frontend data for compatibility
+      frontendData: {
+        deviceName: finalData.vendor?.name || 'OCR Processed Bill',
+        deviceNumber: finalData.billNumber || '',
+        deviceCost: (finalData.totalAmount || 0).toString(),
+        remarks: `OCR processed - ${finalData.billType} bill`,
+        imageUri: imageUri,
+        submittedAt: new Date().toISOString()
+      }
+    });
+
+    const savedBill = await bill.save();
+    console.log('✅ OCR bill saved successfully with ID:', savedBill._id);
+
+    // Return bill summary for frontend
+    const billSummary = savedBill.getBillSummary();
+    
+    res.status(201).json({
+      success: true,
+      message: 'Bill created successfully with OCR data',
+      bill: {
+        _id: savedBill._id,
+        ...billSummary,
+        createdAt: savedBill.createdAt,
+        extractedData: savedBill.extractedData
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Create OCR bill error:', error);
+    
+    if (error.name === 'ValidationError') {
+      const errorMessages = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({ 
+        error: 'Validation failed', 
+        details: errorMessages.join(', ') 
+      });
+    }
+    
+    res.status(500).json({ 
+      error: 'Failed to create bill',
+      details: error.message 
+    });
+  }
+});
+
+// GET /api/ocr/bill/:id - Get OCR processed bill details
+router.get('/bill/:id', authenticateToken, async (req, res) => {
+  try {
+    const bill = await Bill.findOne({
+      _id: req.params.id,
+      userId: req.user.userId
+    });
+
+    if (!bill) {
+      return res.status(404).json({ error: 'Bill not found' });
+    }
+
+    // Return detailed bill information
+    const response = {
+      ...bill.toObject(),
+      summary: bill.getBillSummary(),
+      formattedAmount: bill.getFormattedAmount()
     };
 
-    for (const [type, keywords] of Object.entries(billTypePatterns)) {
-      if (keywords.some(keyword => text.includes(keyword))) {
-        return type;
-      }
-    }
-    
-    return 'other';
-  }
+    res.json(response);
 
-  extractVendorInfo(lines) {
-    const vendor = { name: '', address: '', phone: '', email: '' };
-    
-    // Look for company name (usually first non-empty line)
-    for (let i = 0; i < Math.min(5, lines.length); i++) {
-      const line = lines[i];
-      if (line && !this.isDateOrNumber(line) && line.length > 3) {
-        vendor.name = line;
-        break;
-      }
-    }
-    
-    return vendor;
+  } catch (error) {
+    console.error('Get OCR bill error:', error);
+    res.status(500).json({ error: 'Failed to retrieve bill' });
   }
+});
 
-  extractTotalAmount(lines) {
-    const amountPatterns = [
-      /total.*?(?:rs\.?|₹)\s*(\d+(?:\.\d{2})?)/i,
-      /amount.*?(?:rs\.?|₹)\s*(\d+(?:\.\d{2})?)/i,
-      /(?:rs\.?|₹)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
-      /(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:rs\.?|₹)/i
-    ];
+// GET /api/ocr/search - Enhanced search with OCR data
+router.get('/search', authenticateToken, async (req, res) => {
+  try {
+    const { query, billType, startDate, endDate, minAmount, maxAmount } = req.query;
     
-    const fullText = lines.join(' ');
+    const searchParams = {
+      query,
+      billType,
+      startDate,
+      endDate,
+      minAmount: minAmount ? parseFloat(minAmount) : undefined,
+      maxAmount: maxAmount ? parseFloat(maxAmount) : undefined
+    };
+
+    console.log('🔍 OCR enhanced search with params:', searchParams);
     
-    for (const pattern of amountPatterns) {
-      const match = fullText.match(pattern);
-      if (match) {
-        const amount = parseFloat(match[1].replace(/,/g, ''));
-        if (!isNaN(amount) && amount > 0) {
-          return amount;
+    const bills = await Bill.searchBillsWithOCR(req.user.userId, searchParams);
+    
+    // Transform bills for frontend with OCR awareness
+    const transformedBills = bills.map(bill => {
+      const summary = bill.getBillSummary();
+      return {
+        _id: bill._id,
+        ...summary,
+        createdAt: bill.createdAt,
+        imageUri: bill.imageUri,
+        confidence: bill.ocrConfidence,
+        // Include both OCR and manual entry data for compatibility
+        deviceName: summary.title,
+        deviceNumber: summary.billNumber || bill.deviceNumber,
+        deviceCost: summary.amount?.toString() || '0',
+        remarks: bill.remarks || '',
+        submittedAt: summary.billDate || bill.submittedAt
+      };
+    });
+    
+    res.json({
+      success: true,
+      bills: transformedBills,
+      total: transformedBills.length
+    });
+
+  } catch (error) {
+    console.error('OCR search error:', error);
+    res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+// GET /api/ocr/stats - Get OCR processing statistics (FIXED WITH MONGOOSE IMPORT)
+router.get('/stats', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    
+    // FIXED: Now using imported mongoose
+    const stats = await Bill.aggregate([
+      { $match: { userId: new mongoose.Types.ObjectId(userId) } },
+      {
+        $group: {
+          _id: null,
+          totalBills: { $sum: 1 },
+          ocrProcessedBills: {
+            $sum: { $cond: ['$ocrProcessed', 1, 0] }
+          },
+          manualBills: {
+            $sum: { $cond: ['$ocrProcessed', 0, 1] }
+          },
+          totalAmount: { $sum: '$amount' },
+          avgConfidence: {
+            $avg: { $cond: ['$ocrProcessed', '$ocrConfidence', null] }
+          }
         }
       }
-    }
-    
-    return null;
-  }
+    ]);
 
-  extractBillNumber(lines) {
-    const patterns = [
-      /bill\s*(?:no|number|#):?\s*([a-z0-9]+)/i,
-      /invoice\s*(?:no|number|#):?\s*([a-z0-9]+)/i,
-      /receipt\s*(?:no|number|#):?\s*([a-z0-9]+)/i,
-      /ref\s*(?:no|number)?:?\s*([a-z0-9]+)/i
-    ];
-    
-    const fullText = lines.join(' ');
-    for (const pattern of patterns) {
-      const match = fullText.match(pattern);
-      if (match) return match[1];
-    }
-    
-    return null;
-  }
+    const billTypeStats = await Bill.aggregate([
+      { 
+        $match: { 
+          userId: new mongoose.Types.ObjectId(userId),
+          ocrProcessed: true 
+        } 
+      },
+      {
+        $group: {
+          _id: '$extractedData.billType',
+          count: { $sum: 1 },
+          totalAmount: { $sum: '$extractedData.totalAmount' }
+        }
+      },
+      { $sort: { count: -1 } }
+    ]);
 
-  // Additional helper methods
-  extractBillDate(lines) { return null; }
-  extractDueDate(lines) { return null; }
-  extractCurrency(text) { return 'INR'; }
-  extractLineItems(lines) { return []; }
-  extractPaymentDetails(lines) { return {}; }
-  extractUtilityData(lines, text) { return {}; }
-  
-  calculateOverallConfidence(words) {
-    if (!words || words.length === 0) return 0;
-    const totalConfidence = words.reduce((sum, word) => sum + (word.confidence || 0.8), 0);
-    return totalConfidence / words.length;
-  }
-  
-  isDateOrNumber(text) {
-    return /^\d+([\/\-\.]\d+)*$/.test(text) || /^\d+$/.test(text);
-  }
-}
+    const result = stats.length > 0 ? stats[0] : {
+      totalBills: 0,
+      ocrProcessedBills: 0,
+      manualBills: 0,
+      totalAmount: 0,
+      avgConfidence: 0
+    };
 
-module.exports = new OCRService();
+    res.json({
+      success: true,
+      stats: {
+        ...result,
+        ocrProcessingRate: result.totalBills > 0 ? 
+          (result.ocrProcessedBills / result.totalBills * 100).toFixed(1) : 0,
+        billTypeBreakdown: billTypeStats
+      }
+    });
+
+  } catch (error) {
+    console.error('OCR stats error:', error);
+    res.status(500).json({ error: 'Failed to get statistics' });
+  }
+});
+
+// GET /api/ocr/health - OCR service health check
+router.get('/health', authenticateToken, async (req, res) => {
+  try {
+    const healthCheck = await OCRService.healthCheck();
+    
+    res.json({
+      success: true,
+      ocr: healthCheck,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('OCR health check error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'OCR health check failed',
+      details: error.message 
+    });
+  }
+});
+
+module.exports = router;
