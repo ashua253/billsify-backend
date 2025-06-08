@@ -1,6 +1,7 @@
-// routes/ocr.js - OCR processing endpoints
+// routes/ocr.js - Complete OCR processing endpoints
 const express = require('express');
 const multer = require('multer');
+const mongoose = require('mongoose'); // CRITICAL: mongoose import for ObjectId
 const router = express.Router();
 const Bill = require('../models/Bill');
 const OCRService = require('../services/OCRService');
@@ -14,7 +15,6 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024, // 10MB limit
   },
   fileFilter: (req, file, cb) => {
-    // Accept only image files
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
     } else {
@@ -58,7 +58,6 @@ router.post('/process-image', authenticateToken, upload.single('billImage'), asy
       confidence: ocrResult.confidence
     });
 
-    // Return extracted data for review
     res.json({
       success: true,
       message: 'OCR processing completed',
@@ -73,7 +72,6 @@ router.post('/process-image', authenticateToken, upload.single('billImage'), asy
   } catch (error) {
     console.error('❌ OCR endpoint error:', error);
     
-    // Handle specific errors
     if (error.message.includes('Only image files')) {
       return res.status(400).json({ error: 'Please upload a valid image file' });
     }
@@ -103,7 +101,7 @@ router.post('/create-bill', authenticateToken, async (req, res) => {
     // Merge extracted data with user confirmed data
     const finalData = {
       ...extractedData,
-      ...userConfirmedData // User can override any extracted data
+      ...userConfirmedData
     };
 
     console.log('🔍 Final bill data:', {
@@ -130,7 +128,9 @@ router.post('/create-bill', authenticateToken, async (req, res) => {
       notes: finalData.rawText ? finalData.rawText.substring(0, 500) : '',
       category: finalData.billType === 'electricity' ? 'Utilities' : 
                 finalData.billType === 'shopping' ? 'Shopping' : 
-                finalData.billType === 'restaurant' ? 'Food' : 'Other',
+                finalData.billType === 'restaurant' ? 'Food' : 
+                finalData.billType === 'mobile' ? 'Services' :
+                finalData.billType === 'internet' ? 'Services' : 'Other',
       date: finalData.billDate || new Date(),
       
       // Store image URI
@@ -201,7 +201,6 @@ router.get('/bill/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Bill not found' });
     }
 
-    // Return detailed bill information
     const response = {
       ...bill.toObject(),
       summary: bill.getBillSummary(),
@@ -243,7 +242,6 @@ router.get('/search', authenticateToken, async (req, res) => {
         createdAt: bill.createdAt,
         imageUri: bill.imageUri,
         confidence: bill.ocrConfidence,
-        // Include both OCR and manual entry data for compatibility
         deviceName: summary.title,
         deviceNumber: summary.billNumber || bill.deviceNumber,
         deviceCost: summary.amount?.toString() || '0',
@@ -269,6 +267,7 @@ router.get('/stats', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     
+    // Using mongoose import for ObjectId
     const stats = await Bill.aggregate([
       { $match: { userId: new mongoose.Types.ObjectId(userId) } },
       {
@@ -327,6 +326,26 @@ router.get('/stats', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('OCR stats error:', error);
     res.status(500).json({ error: 'Failed to get statistics' });
+  }
+});
+
+// GET /api/ocr/health - OCR service health check
+router.get('/health', authenticateToken, async (req, res) => {
+  try {
+    const healthCheck = await OCRService.healthCheck();
+    
+    res.json({
+      success: true,
+      ocr: healthCheck,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('OCR health check error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'OCR health check failed',
+      details: error.message 
+    });
   }
 });
 
