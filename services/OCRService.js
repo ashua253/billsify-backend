@@ -1,4 +1,4 @@
-// services/OCRService.js - Complete Enhanced OCR service with Google Cloud Vision API
+// services/OCRService.js - FIXED Complete Enhanced OCR service with proper regex flags
 const vision = require('@google-cloud/vision');
 
 class OCRService {
@@ -260,27 +260,27 @@ class OCRService {
     return vendor;
   }
 
-  // Enhanced total amount extraction
+  // FIXED: Enhanced total amount extraction with proper regex handling
   extractTotalAmount(lines) {
     const amountPatterns = [
-      // Standard total patterns
-      /total.*?(?:rs\.?|₹|inr)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
-      /total.*?(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:rs\.?|₹|inr)?/i,
+      // Standard total patterns - ALL with 'g' flag for matchAll
+      /total.*?(?:rs\.?|₹|inr)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,
+      /total.*?(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:rs\.?|₹|inr)?/gi,
       
       // Invoice amount patterns
-      /(?:total\s*)?invoice\s*amount.*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
-      /amount.*?(?:rs\.?|₹|inr)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
-      /amount.*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
+      /(?:total\s*)?invoice\s*amount.*?(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,
+      /amount.*?(?:rs\.?|₹|inr)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,
+      /amount.*?(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,
       
       // Generic currency patterns
       /(?:rs\.?|₹|inr)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,
       /(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:rs\.?|₹|inr)/gi,
       
       // Balance/due patterns
-      /(?:grand\s*total|net\s*amount|balance|due).*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
+      /(?:grand\s*total|net\s*amount|balance|due).*?(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,
       
       // Tender/payment patterns
-      /(?:tender|payment|paid).*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
+      /(?:tender|payment|paid).*?(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,
       
       // Receipt-specific patterns
       /(\d+\.\d{2})\s*(?:\n|$)/g // Decimal amounts at end of lines
@@ -293,7 +293,7 @@ class OCRService {
     
     // Try each pattern and collect all potential amounts
     for (const pattern of amountPatterns) {
-      const matches = fullText.matchAll(pattern);
+      const matches = [...fullText.matchAll(pattern)]; // Convert iterator to array
       for (const match of matches) {
         const amountStr = match[1] || match[0];
         const amount = parseFloat(amountStr.replace(/,/g, ''));
@@ -333,40 +333,47 @@ class OCRService {
     return selectedAmount;
   }
 
-  // Enhanced bill number extraction
+  // FIXED: Enhanced bill number extraction with proper regex handling
   extractBillNumber(lines) {
-    const patterns = [
-      // Standard patterns
-      /(?:bill|invoice|receipt)\s*(?:no|number|#):?\s*([a-z0-9]+)/i,
-      /(?:ref|reference)\s*(?:no|number)?:?\s*([a-z0-9]+)/i,
-      /(?:transaction|txn)\s*(?:id|no):?\s*([a-z0-9]+)/i,
-      /(?:order|voucher)\s*(?:id|no):?\s*([a-z0-9]+)/i,
-      
-      // Specific formats like "Z179", "INV001", etc.
-      /\b([a-z]\d{3,})\b/gi,
-      /\b(inv[a-z0-9]+)\b/gi,
-      /\b([a-z]{2,4}\d{4,})\b/gi,
-      
-      // Number after keywords
-      /invoice\s*(?:no\.?)?\s*:?\s*([a-z0-9]+)/i,
-      /bill\s*(?:no\.?)?\s*:?\s*([a-z0-9]+)/i,
-      /receipt\s*(?:no\.?)?\s*:?\s*([a-z0-9]+)/i,
-      
-      // Counter/cashier patterns
-      /counter.*?(\d+)/i,
-      /cashier.*?(\d+)/i,
-      
-      // Line-specific patterns
-      /^([a-z]\d{3,})$/gmi, // Lines that are just alphanumeric codes
-    ];
-    
     const fullText = lines.join(' ');
     
     console.log('🔢 Searching for bill numbers...');
     
-    // Try each pattern
-    for (const pattern of patterns) {
-      const matches = fullText.matchAll(pattern);
+    // Use individual match() calls instead of matchAll for single matches
+    const singleMatchPatterns = [
+      /(?:bill|invoice|receipt)\s*(?:no|number|#):?\s*([a-z0-9]+)/i,
+      /(?:ref|reference)\s*(?:no|number)?:?\s*([a-z0-9]+)/i,
+      /(?:transaction|txn)\s*(?:id|no):?\s*([a-z0-9]+)/i,
+      /(?:order|voucher)\s*(?:id|no):?\s*([a-z0-9]+)/i,
+      /invoice\s*(?:no\.?)?\s*:?\s*([a-z0-9]+)/i,
+      /bill\s*(?:no\.?)?\s*:?\s*([a-z0-9]+)/i,
+      /receipt\s*(?:no\.?)?\s*:?\s*([a-z0-9]+)/i,
+      /counter.*?(\d+)/i,
+      /cashier.*?(\d+)/i,
+    ];
+    
+    // Try single match patterns first
+    for (const pattern of singleMatchPatterns) {
+      const match = fullText.match(pattern);
+      if (match && match[1] && match[1].length >= 3 && match[1].length <= 20) {
+        // Avoid pure numbers that might be amounts
+        if (!/^\d+$/.test(match[1]) || match[1].length <= 6) {
+          console.log('✅ Found bill number:', match[1].toUpperCase());
+          return match[1].toUpperCase();
+        }
+      }
+    }
+    
+    // Use matchAll for global patterns
+    const globalMatchPatterns = [
+      /\b([a-z]\d{3,})\b/gi,
+      /\b(inv[a-z0-9]+)\b/gi,
+      /\b([a-z]{2,4}\d{4,})\b/gi,
+      /^([a-z]\d{3,})$/gmi,
+    ];
+    
+    for (const pattern of globalMatchPatterns) {
+      const matches = [...fullText.matchAll(pattern)];
       for (const match of matches) {
         const billNo = match[1];
         if (billNo && billNo.length >= 3 && billNo.length <= 20) {
@@ -392,11 +399,11 @@ class OCRService {
     return null;
   }
 
-  // Enhanced bill date extraction
+  // FIXED: Enhanced bill date extraction with proper regex handling
   extractBillDate(lines) {
     const datePatterns = [
-      // Standard date formats
-      /(?:date|bill|invoice).*?(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/i,
+      // Standard date formats - ALL with 'g' flag for matchAll
+      /(?:date|bill|invoice).*?(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/gi,
       /(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})/g,
       /(\d{2}[\/\-\.]\d{2}[\/\-\.]\d{2})/g,
       
@@ -404,7 +411,7 @@ class OCRService {
       /(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\s+\d{1,2}:\d{2}/g,
       
       // Text format dates
-      /(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{2,4})/i,
+      /(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{2,4})/gi,
       /(\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4})/g,
       
       // Reverse format (YYYY-MM-DD)
@@ -419,7 +426,7 @@ class OCRService {
     console.log('📅 Searching for bill dates...');
     
     for (const pattern of datePatterns) {
-      const matches = fullText.matchAll(pattern);
+      const matches = [...fullText.matchAll(pattern)];
       for (const match of matches) {
         const dateStr = match[1];
         const date = this.parseDate(dateStr);
