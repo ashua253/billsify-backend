@@ -1,4 +1,4 @@
-// services/OCRService.js - Complete OCR service with Google Cloud Vision API
+// services/OCRService.js - Complete Enhanced OCR service with Google Cloud Vision API
 const vision = require('@google-cloud/vision');
 
 class OCRService {
@@ -127,6 +127,7 @@ class OCRService {
 
       console.log('📝 Extracted text length:', fullText.length);
       console.log('🔤 Total words detected:', words.length);
+      console.log('📄 Full extracted text:', fullText);
 
       return {
         fullText,
@@ -146,6 +147,7 @@ class OCRService {
     const lines = extractedText.fullText.split('\n').map(line => line.trim()).filter(line => line);
     
     console.log('🔍 Parsing extracted text into structured data...');
+    console.log('📄 Text lines:', lines.slice(0, 10)); // Log first 10 lines for debugging
     
     const structuredData = {
       billType: this.identifyBillType(text),
@@ -167,7 +169,8 @@ class OCRService {
       billType: structuredData.billType,
       vendorName: structuredData.vendor?.name,
       amount: structuredData.totalAmount,
-      billNumber: structuredData.billNumber
+      billNumber: structuredData.billNumber,
+      billDate: structuredData.billDate
     });
 
     return structuredData;
@@ -182,7 +185,7 @@ class OCRService {
       'internet': ['internet', 'broadband', 'wifi', 'data', 'mbps', 'fiber', 'jio', 'airtel', 'bsnl'],
       'mobile': ['mobile', 'phone', 'cellular', 'telecom', 'airtime', 'prepaid', 'postpaid'],
       'credit_card': ['credit card', 'statement', 'minimum due', 'credit limit', 'outstanding', 'hdfc', 'icici', 'sbi card'],
-      'shopping': ['invoice', 'receipt', 'purchase', 'retail', 'store', 'amazon', 'flipkart', 'mall'],
+      'shopping': ['invoice', 'receipt', 'purchase', 'retail', 'store', 'amazon', 'flipkart', 'mall', 'shopping', 'bill of supply'],
       'restaurant': ['restaurant', 'cafe', 'food', 'dining', 'menu', 'hotel', 'swiggy', 'zomato'],
       'medical': ['medical', 'hospital', 'clinic', 'pharmacy', 'prescription', 'apollo', 'fortis'],
       'insurance': ['insurance', 'policy', 'premium', 'coverage', 'lic', 'bajaj', 'hdfc life']
@@ -197,30 +200,59 @@ class OCRService {
     return 'other';
   }
 
-  // Extract vendor information
+  // Enhanced vendor information extraction
   extractVendorInfo(lines) {
     const vendor = { name: '', address: '', phone: '', email: '' };
     
-    // Look for company name (usually first few non-empty lines)
-    for (let i = 0; i < Math.min(5, lines.length); i++) {
-      const line = lines[i];
-      if (line && !this.isDateOrNumber(line) && line.length > 3 && !line.includes('@')) {
-        vendor.name = line;
+    // Look for company name in first few lines, but be smarter about it
+    for (let i = 0; i < Math.min(8, lines.length); i++) {
+      const line = lines[i].trim();
+      
+      // Skip if line contains obvious non-vendor content
+      if (this.isDateOrNumber(line) || 
+          line.includes('@') ||
+          line.toLowerCase().includes('invoice') ||
+          line.toLowerCase().includes('receipt') ||
+          line.toLowerCase().includes('bill') ||
+          line.length < 3 ||
+          /^\d+$/.test(line) ||
+          line.toLowerCase().includes('address') ||
+          line.toLowerCase().includes('gst')) {
+        continue;
+      }
+      
+      // Look for company-like names
+      if (line.length >= 3 && line.length <= 50) {
+        // Check if it looks like a company name
+        if (/^[a-zA-Z][a-zA-Z\s&\.,-]*[a-zA-Z]$/.test(line) ||
+            /^[a-zA-Z]+$/.test(line)) {
+          vendor.name = line;
+          break;
+        }
+      }
+    }
+    
+    // Extract contact info from full text
+    const fullText = lines.join(' ');
+    
+    // Enhanced phone patterns
+    const phonePatterns = [
+      /(?:tel|phone|mob|mobile|contact).*?(\+?\d{1,3}[-.\s]?\d{3,4}[-.\s]?\d{3,4}[-.\s]?\d{3,4})/i,
+      /(\+?\d{2,3}[-.\s]?\d{4}[-.\s]?\d{4}[-.\s]?\d{4})/g,
+      /(\d{10,12})/g
+    ];
+    
+    for (const pattern of phonePatterns) {
+      const match = fullText.match(pattern);
+      if (match) {
+        vendor.phone = match[1];
         break;
       }
     }
     
-    // Extract phone numbers and emails
-    const phoneRegex = /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g;
+    // Email extraction
     const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-    
-    const fullText = lines.join(' ');
-    const phoneMatch = fullText.match(phoneRegex);
     const emailMatch = fullText.match(emailRegex);
-    
-    if (phoneMatch && phoneMatch.length > 0) {
-      vendor.phone = phoneMatch[0];
-    }
     if (emailMatch && emailMatch.length > 0) {
       vendor.email = emailMatch[0];
     }
@@ -228,77 +260,179 @@ class OCRService {
     return vendor;
   }
 
-  // Extract total amount
+  // Enhanced total amount extraction
   extractTotalAmount(lines) {
     const amountPatterns = [
-      /total.*?(?:rs\.?|₹)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
-      /amount.*?(?:rs\.?|₹)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
-      /(?:rs\.?|₹)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
-      /(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:rs\.?|₹)/i,
-      /grand\s*total.*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
-      /net\s*amount.*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
-      /balance.*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i
+      // Standard total patterns
+      /total.*?(?:rs\.?|₹|inr)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
+      /total.*?(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:rs\.?|₹|inr)?/i,
+      
+      // Invoice amount patterns
+      /(?:total\s*)?invoice\s*amount.*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
+      /amount.*?(?:rs\.?|₹|inr)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
+      /amount.*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
+      
+      // Generic currency patterns
+      /(?:rs\.?|₹|inr)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,
+      /(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:rs\.?|₹|inr)/gi,
+      
+      // Balance/due patterns
+      /(?:grand\s*total|net\s*amount|balance|due).*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
+      
+      // Tender/payment patterns
+      /(?:tender|payment|paid).*?(\d+(?:,\d{3})*(?:\.\d{2})?)/i,
+      
+      // Receipt-specific patterns
+      /(\d+\.\d{2})\s*(?:\n|$)/g // Decimal amounts at end of lines
     ];
     
     const fullText = lines.join(' ');
+    const amounts = [];
     
+    console.log('💰 Searching for amounts in text...');
+    
+    // Try each pattern and collect all potential amounts
     for (const pattern of amountPatterns) {
-      const match = fullText.match(pattern);
-      if (match) {
-        const amount = parseFloat(match[1].replace(/,/g, ''));
-        if (!isNaN(amount) && amount > 0) {
+      const matches = fullText.matchAll(pattern);
+      for (const match of matches) {
+        const amountStr = match[1] || match[0];
+        const amount = parseFloat(amountStr.replace(/,/g, ''));
+        if (!isNaN(amount) && amount > 0 && amount < 1000000) { // Reasonable range
+          amounts.push(amount);
+          console.log('💰 Found potential amount:', amount, 'from pattern:', pattern.source);
+        }
+      }
+    }
+    
+    if (amounts.length === 0) {
+      console.log('❌ No amounts found');
+      return null;
+    }
+    
+    // Prefer amounts that appear near "total" or "amount" keywords
+    const textLower = fullText.toLowerCase();
+    for (const amount of amounts) {
+      const amountStr = amount.toString();
+      const amountIndex = textLower.indexOf(amountStr);
+      if (amountIndex > -1) {
+        const contextBefore = textLower.substring(Math.max(0, amountIndex - 50), amountIndex);
+        const contextAfter = textLower.substring(amountIndex, amountIndex + 50);
+        
+        if (contextBefore.includes('total') || contextBefore.includes('amount') || 
+            contextAfter.includes('total') || contextAfter.includes('amount') ||
+            contextBefore.includes('invoice') || contextBefore.includes('payment')) {
+          console.log('✅ Selected contextual amount:', amount);
           return amount;
         }
       }
     }
     
-    return null;
+    // Return the largest amount if no contextual match
+    const selectedAmount = Math.max(...amounts);
+    console.log('✅ Selected largest amount:', selectedAmount);
+    return selectedAmount;
   }
 
-  // Extract bill number
+  // Enhanced bill number extraction
   extractBillNumber(lines) {
     const patterns = [
-      /bill\s*(?:no|number|#):?\s*([a-z0-9]+)/i,
-      /invoice\s*(?:no|number|#):?\s*([a-z0-9]+)/i,
-      /receipt\s*(?:no|number|#):?\s*([a-z0-9]+)/i,
-      /ref\s*(?:no|number)?:?\s*([a-z0-9]+)/i,
-      /transaction\s*(?:id|no):?\s*([a-z0-9]+)/i,
-      /order\s*(?:id|no):?\s*([a-z0-9]+)/i
+      // Standard patterns
+      /(?:bill|invoice|receipt)\s*(?:no|number|#):?\s*([a-z0-9]+)/i,
+      /(?:ref|reference)\s*(?:no|number)?:?\s*([a-z0-9]+)/i,
+      /(?:transaction|txn)\s*(?:id|no):?\s*([a-z0-9]+)/i,
+      /(?:order|voucher)\s*(?:id|no):?\s*([a-z0-9]+)/i,
+      
+      // Specific formats like "Z179", "INV001", etc.
+      /\b([a-z]\d{3,})\b/gi,
+      /\b(inv[a-z0-9]+)\b/gi,
+      /\b([a-z]{2,4}\d{4,})\b/gi,
+      
+      // Number after keywords
+      /invoice\s*(?:no\.?)?\s*:?\s*([a-z0-9]+)/i,
+      /bill\s*(?:no\.?)?\s*:?\s*([a-z0-9]+)/i,
+      /receipt\s*(?:no\.?)?\s*:?\s*([a-z0-9]+)/i,
+      
+      // Counter/cashier patterns
+      /counter.*?(\d+)/i,
+      /cashier.*?(\d+)/i,
+      
+      // Line-specific patterns
+      /^([a-z]\d{3,})$/gmi, // Lines that are just alphanumeric codes
     ];
     
     const fullText = lines.join(' ');
+    
+    console.log('🔢 Searching for bill numbers...');
+    
+    // Try each pattern
     for (const pattern of patterns) {
-      const match = fullText.match(pattern);
-      if (match && match[1].length > 3) {
-        return match[1];
-      }
-    }
-    
-    return null;
-  }
-
-  // Extract bill date
-  extractBillDate(lines) {
-    const datePatterns = [
-      /(?:bill|invoice|date).*?(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/i,
-      /(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/g,
-      /(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{2,4})/i
-    ];
-    
-    const fullText = lines.join(' ');
-    for (const pattern of datePatterns) {
-      const matches = fullText.match(pattern);
-      if (matches) {
-        for (const match of matches) {
-          const dateStr = match.includes('date') ? match.split(/date/i)[1] : match;
-          const date = this.parseDate(dateStr.trim());
-          if (date && date > new Date('2020-01-01') && date <= new Date()) {
-            return date;
+      const matches = fullText.matchAll(pattern);
+      for (const match of matches) {
+        const billNo = match[1];
+        if (billNo && billNo.length >= 3 && billNo.length <= 20) {
+          // Avoid pure numbers that might be amounts
+          if (!/^\d+$/.test(billNo) || billNo.length <= 6) {
+            console.log('✅ Found bill number:', billNo.toUpperCase());
+            return billNo.toUpperCase();
           }
         }
       }
     }
     
+    // Look in individual lines for standalone codes
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (/^[a-z]\d{3,8}$/i.test(trimmed)) {
+        console.log('✅ Found standalone bill number:', trimmed.toUpperCase());
+        return trimmed.toUpperCase();
+      }
+    }
+    
+    console.log('❌ No bill number found');
+    return null;
+  }
+
+  // Enhanced bill date extraction
+  extractBillDate(lines) {
+    const datePatterns = [
+      // Standard date formats
+      /(?:date|bill|invoice).*?(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/i,
+      /(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})/g,
+      /(\d{2}[\/\-\.]\d{2}[\/\-\.]\d{2})/g,
+      
+      // Time with date
+      /(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\s+\d{1,2}:\d{2}/g,
+      
+      // Text format dates
+      /(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{2,4})/i,
+      /(\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4})/g,
+      
+      // Reverse format (YYYY-MM-DD)
+      /(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})/g,
+    ];
+    
+    const fullText = lines.join(' ');
+    const today = new Date();
+    const oneYearAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
+    const oneYearAhead = new Date(today.getFullYear() + 1, today.getMonth(), today.getDate());
+    
+    console.log('📅 Searching for bill dates...');
+    
+    for (const pattern of datePatterns) {
+      const matches = fullText.matchAll(pattern);
+      for (const match of matches) {
+        const dateStr = match[1];
+        const date = this.parseDate(dateStr);
+        
+        // Check if date is reasonable (within 1 year past to 1 year future)
+        if (date && date >= oneYearAgo && date <= oneYearAhead) {
+          console.log('✅ Found valid bill date:', date);
+          return date;
+        }
+      }
+    }
+    
+    console.log('❌ No valid bill date found');
     return null;
   }
 
@@ -325,18 +459,23 @@ class OCRService {
     return null;
   }
 
-  // Extract currency
+  // Enhanced currency detection
   extractCurrency(text) {
-    if (text.includes('₹') || text.includes('rs.') || text.includes('inr') || text.includes('rupee')) {
+    const textLower = text.toLowerCase();
+    
+    if (textLower.includes('₹') || textLower.includes('rs.') || 
+        textLower.includes('rs ') || textLower.includes('inr') || 
+        textLower.includes('rupee') || textLower.includes('india')) {
       return 'INR';
     }
-    if (text.includes('$') || text.includes('usd') || text.includes('dollar')) {
+    if (textLower.includes('$') || textLower.includes('usd') || textLower.includes('dollar')) {
       return 'USD';
     }
-    if (text.includes('€') || text.includes('eur') || text.includes('euro')) {
+    if (textLower.includes('€') || textLower.includes('eur') || textLower.includes('euro')) {
       return 'EUR';
     }
-    return 'INR'; // Default to INR
+    
+    return 'INR'; // Default to INR for Indian app
   }
 
   // Extract line items
