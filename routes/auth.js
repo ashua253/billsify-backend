@@ -254,9 +254,16 @@ router.get('/admin/pending-affiliates', authenticateToken, async (req, res) => {
   }
 });
 
-// Approve/Reject affiliate (Super Admin only)
+// routes/auth.js - FIXED: Approve/Reject affiliate route
+// Add this to your existing auth.js file, replacing the approve-affiliate route
+
+// Approve/Reject affiliate (Super Admin only) - FIXED VERSION
 router.post('/admin/approve-affiliate/:affiliateId', authenticateToken, async (req, res) => {
   try {
+    console.log('🔍 Approve affiliate request received');
+    console.log('📝 Affiliate ID from params:', req.params.affiliateId);
+    console.log('📝 Request body:', req.body);
+
     const adminUser = await User.findById(req.user.userId);
     if (!adminUser || adminUser.userType !== 'superadmin') {
       return res.status(403).json({ error: 'Access denied. Super admin required.' });
@@ -265,12 +272,40 @@ router.post('/admin/approve-affiliate/:affiliateId', authenticateToken, async (r
     const { action, gstNumber, businessType, requiresInventoryManagement, rejectionReason } = req.body;
     const { affiliateId } = req.params;
 
+    // FIXED: Validate affiliateId
+    if (!affiliateId || affiliateId === 'undefined' || affiliateId === 'null') {
+      console.error('❌ Invalid affiliate ID:', affiliateId);
+      return res.status(400).json({ error: 'Invalid affiliate ID provided' });
+    }
+
+    // FIXED: Validate MongoDB ObjectId format
+    if (!affiliateId.match(/^[0-9a-fA-F]{24}$/)) {
+      console.error('❌ Invalid ObjectId format:', affiliateId);
+      return res.status(400).json({ error: 'Invalid affiliate ID format' });
+    }
+
+    console.log('✅ Searching for affiliate with ID:', affiliateId);
+
     const affiliate = await User.findById(affiliateId);
     if (!affiliate || affiliate.userType !== 'affiliate') {
+      console.error('❌ Affiliate not found or invalid type:', { 
+        found: !!affiliate, 
+        userType: affiliate?.userType 
+      });
       return res.status(404).json({ error: 'Affiliate not found' });
     }
 
+    console.log('✅ Found affiliate:', {
+      id: affiliate._id,
+      name: affiliate.name,
+      email: affiliate.email,
+      currentStatus: affiliate.status,
+      approvalStatus: affiliate.affiliateDetails?.approvalStatus
+    });
+
     if (action === 'approve') {
+      console.log('✅ Approving affiliate...');
+      
       affiliate.status = 'active';
       affiliate.affiliateDetails.approvalStatus = 'approved';
       affiliate.affiliateDetails.approvedBy = req.user.userId;
@@ -285,24 +320,51 @@ router.post('/admin/approve-affiliate/:affiliateId', authenticateToken, async (r
       
       await affiliate.save();
       
+      console.log('✅ Affiliate approved successfully');
+      
       res.json({ 
         message: 'Affiliate approved successfully',
         affiliate: affiliate.getPublicProfile()
       });
+      
     } else if (action === 'reject') {
+      console.log('❌ Rejecting affiliate...');
+      
       affiliate.status = 'inactive';
       affiliate.affiliateDetails.approvalStatus = 'rejected';
       affiliate.affiliateDetails.rejectionReason = rejectionReason || 'No reason provided';
       
       await affiliate.save();
       
+      console.log('✅ Affiliate rejected successfully');
+      
       res.json({ message: 'Affiliate rejected successfully' });
+      
     } else {
+      console.error('❌ Invalid action:', action);
       res.status(400).json({ error: 'Invalid action. Use approve or reject.' });
     }
+    
   } catch (error) {
     console.error('❌ Approve affiliate error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    
+    // Provide more specific error messages
+    if (error.name === 'CastError') {
+      return res.status(400).json({ 
+        error: 'Invalid affiliate ID format. Please check the ID and try again.' 
+      });
+    }
+    
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ 
+        error: 'Validation failed: ' + Object.values(error.errors).map(e => e.message).join(', ')
+      });
+    }
+    
+    res.status(500).json({ 
+      error: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
