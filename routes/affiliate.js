@@ -204,7 +204,7 @@ router.get('/inventory/search', authenticateToken, checkAffiliate, async (req, r
 
 // ============ CUSTOMER BILL ROUTES ============
 
-// UPDATED: Create customer bill with item-level discounts
+// FIXED: Create customer bill with enhanced error handling and validation
 router.post('/bills', authenticateToken, checkAffiliate, async (req, res) => {
   try {
     const {
@@ -218,67 +218,109 @@ router.post('/bills', authenticateToken, checkAffiliate, async (req, res) => {
 
     console.log('📥 Creating bill with data:', {
       customerPhoneNumber,
+      customerName,
       itemCount: items?.length,
+      discountAmount,
       hasInventoryManagement: req.affiliate.affiliateDetails?.requiresInventoryManagement
     });
 
-    // Validation
-    if (!customerPhoneNumber || !items || items.length === 0) {
+    // Enhanced validation
+    if (!customerPhoneNumber || !customerPhoneNumber.trim()) {
       return res.status(400).json({ 
-        error: 'Customer phone number and items are required' 
+        error: 'Customer phone number is required' 
+      });
+    }
+
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ 
+        error: 'At least one item is required' 
       });
     }
 
     // Validate phone number format
     const phoneRegex = /^[6-9]\d{9}$/;
-    if (!phoneRegex.test(customerPhoneNumber)) {
+    if (!phoneRegex.test(customerPhoneNumber.trim())) {
       return res.status(400).json({ 
         error: 'Please enter a valid 10-digit mobile number' 
       });
     }
 
-    // Validate items
-    for (let item of items) {
-      if (!item.itemName || !item.quantity || !item.unitPrice) {
+    // Enhanced item validation
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      
+      if (!item.itemName || !item.itemName.trim()) {
         return res.status(400).json({ 
-          error: 'Each item must have name, quantity, and unit price' 
+          error: `Item ${i + 1}: Item name is required` 
         });
       }
-      if (parseFloat(item.quantity) <= 0 || parseFloat(item.unitPrice) < 0) {
+      
+      const quantity = parseFloat(item.quantity);
+      const unitPrice = parseFloat(item.unitPrice);
+      const discount = parseFloat(item.discount || 0);
+      
+      if (isNaN(quantity) || quantity <= 0) {
         return res.status(400).json({ 
-          error: 'Quantity must be positive and price cannot be negative' 
+          error: `Item ${i + 1}: Quantity must be greater than 0` 
         });
       }
-      if (item.discount && parseFloat(item.discount) < 0) {
+      
+      if (isNaN(unitPrice) || unitPrice < 0) {
         return res.status(400).json({ 
-          error: 'Discount cannot be negative' 
+          error: `Item ${i + 1}: Unit price cannot be negative` 
+        });
+      }
+      
+      if (isNaN(discount) || discount < 0) {
+        return res.status(400).json({ 
+          error: `Item ${i + 1}: Discount cannot be negative` 
         });
       }
     }
 
     // Check inventory availability if affiliate uses inventory management
     if (req.affiliate.affiliateDetails?.requiresInventoryManagement) {
-      for (let item of items) {
+      console.log('🔍 Checking inventory availability...');
+      
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        
         if (item.inventoryItemId) {
-          const inventoryItem = await Inventory.findById(item.inventoryItemId);
-          if (!inventoryItem || inventoryItem.availableQuantity < parseFloat(item.quantity)) {
+          try {
+            const inventoryItem = await Inventory.findById(item.inventoryItemId);
+            
+            if (!inventoryItem) {
+              return res.status(400).json({ 
+                error: `Item "${item.itemName}" not found in inventory` 
+              });
+            }
+            
+            if (inventoryItem.availableQuantity < parseFloat(item.quantity)) {
+              return res.status(400).json({ 
+                error: `Insufficient stock for ${item.itemName}. Available: ${inventoryItem.availableQuantity} ${inventoryItem.unit}, Requested: ${item.quantity}` 
+              });
+            }
+            
+            console.log(`✅ Inventory check passed for ${item.itemName}: ${inventoryItem.availableQuantity} available, ${item.quantity} requested`);
+          } catch (invError) {
+            console.error('❌ Inventory check error:', invError);
             return res.status(400).json({ 
-              error: `Insufficient stock for ${item.itemName}. Available: ${inventoryItem?.availableQuantity || 0}` 
+              error: `Failed to verify inventory for ${item.itemName}` 
             });
           }
         }
       }
     }
 
-    // UPDATED: Process items with individual discounts
-    const processedItems = items.map(item => {
+    // ENHANCED: Process items with validation and proper number conversion
+    const processedItems = items.map((item, index) => {
       const quantity = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unitPrice);
       const itemDiscount = parseFloat(item.discount || 0);
       const grossAmount = quantity * unitPrice;
       const netAmount = Math.max(0, grossAmount - itemDiscount);
 
-      return {
+      const processedItem = {
         itemName: item.itemName.trim(),
         quantity: quantity,
         unitPrice: unitPrice,
@@ -286,31 +328,54 @@ router.post('/bills', authenticateToken, checkAffiliate, async (req, res) => {
         totalPrice: netAmount,
         inventoryItemId: item.inventoryItemId || null
       };
+
+      console.log(`📊 Processed item ${index + 1}:`, {
+        name: processedItem.itemName,
+        quantity: processedItem.quantity,
+        unitPrice: processedItem.unitPrice,
+        discount: processedItem.discount,
+        totalPrice: processedItem.totalPrice
+      });
+
+      return processedItem;
     });
 
-    console.log('📊 Processed items:', processedItems.map(item => ({
-      name: item.itemName,
-      quantity: item.quantity,
-      unitPrice: item.unitPrice,
-      discount: item.discount,
-      totalPrice: item.totalPrice
-    })));
+    // Validate discount amount
+    const additionalDiscount = parseFloat(discountAmount || 0);
+    if (isNaN(additionalDiscount) || additionalDiscount < 0) {
+      return res.status(400).json({ 
+        error: 'Additional discount cannot be negative' 
+      });
+    }
 
-    // Create customer bill
-    const customerBill = new CustomerBill({
+    console.log('📝 Creating CustomerBill document...');
+
+    // Create customer bill with all required data
+    const customerBillData = {
       affiliateId: req.user.userId,
       customerPhoneNumber: customerPhoneNumber.trim(),
       customerName: customerName?.trim() || '',
       items: processedItems,
-      discountAmount: parseFloat(discountAmount || 0),
+      discountAmount: additionalDiscount,
       remarks: remarks?.trim() || '',
       paymentMethod: paymentMethod || 'pending',
       status: 'sent'
+    };
+
+    console.log('💾 CustomerBill data prepared:', {
+      affiliateId: customerBillData.affiliateId,
+      customerPhoneNumber: customerBillData.customerPhoneNumber,
+      itemsCount: customerBillData.items.length,
+      discountAmount: customerBillData.discountAmount
     });
 
+    const customerBill = new CustomerBill(customerBillData);
+
+    console.log('💾 Attempting to save CustomerBill...');
     const savedBill = await customerBill.save();
 
     console.log('✅ Bill created successfully:', {
+      billId: savedBill._id,
       billNumber: savedBill.billNumber,
       subtotal: savedBill.subtotal,
       totalItemDiscounts: savedBill.totalItemDiscounts,
@@ -320,38 +385,86 @@ router.post('/bills', authenticateToken, checkAffiliate, async (req, res) => {
 
     // Update inventory if needed
     if (req.affiliate.affiliateDetails?.requiresInventoryManagement) {
-      for (let item of processedItems) {
+      console.log('📦 Updating inventory...');
+      
+      for (let i = 0; i < processedItems.length; i++) {
+        const item = processedItems[i];
+        
         if (item.inventoryItemId) {
-          const inventoryItem = await Inventory.findById(item.inventoryItemId);
-          if (inventoryItem) {
-            await inventoryItem.updateStock(item.quantity);
-            console.log(`📦 Updated inventory for ${inventoryItem.itemName}: ${inventoryItem.availableQuantity} remaining`);
+          try {
+            const inventoryItem = await Inventory.findById(item.inventoryItemId);
+            if (inventoryItem) {
+              await inventoryItem.updateStock(item.quantity);
+              console.log(`📦 Updated inventory for ${inventoryItem.itemName}: ${inventoryItem.availableQuantity} remaining`);
+            }
+          } catch (invUpdateError) {
+            console.error('❌ Failed to update inventory for item:', item.itemName, invUpdateError);
+            // Don't fail the bill creation, just log the error
           }
         }
       }
     }
 
     // Generate PDF (placeholder for now)
-    await savedBill.generatePDF();
+    try {
+      await savedBill.generatePDF();
+    } catch (pdfError) {
+      console.error('⚠️ PDF generation failed:', pdfError);
+      // Don't fail the bill creation
+    }
 
     // Send WhatsApp (placeholder for now)
-    await savedBill.sendWhatsApp();
+    try {
+      await savedBill.sendWhatsApp();
+    } catch (whatsappError) {
+      console.error('⚠️ WhatsApp sending failed:', whatsappError);
+      // Don't fail the bill creation
+    }
 
     // Return bill with breakdown
     const billBreakdown = savedBill.getBillBreakdown();
 
+    console.log('🎉 Bill creation completed successfully');
+
     res.status(201).json({
       message: 'Customer bill created successfully',
       bill: {
-        ...savedBill.toObject(),
+        _id: savedBill._id,
+        billNumber: savedBill.billNumber,
+        customerPhoneNumber: savedBill.customerPhoneNumber,
+        customerName: savedBill.customerName,
+        items: savedBill.items,
+        subtotal: savedBill.subtotal,
+        discountAmount: savedBill.discountAmount,
+        totalItemDiscounts: savedBill.totalItemDiscounts,
+        totalAmount: savedBill.totalAmount,
+        status: savedBill.status,
+        billDate: savedBill.billDate,
         breakdown: billBreakdown
       }
     });
+
   } catch (error) {
     console.error('❌ Create customer bill error:', error);
-    res.status(500).json({ 
-      error: 'Failed to create customer bill',
-      details: error.message 
+    
+    // Enhanced error response
+    let errorMessage = 'Failed to create customer bill';
+    let statusCode = 500;
+    
+    if (error.name === 'ValidationError') {
+      statusCode = 400;
+      const errorMessages = Object.values(error.errors).map(err => err.message);
+      errorMessage = `Validation failed: ${errorMessages.join(', ')}`;
+    } else if (error.name === 'MongoServerError' && error.code === 11000) {
+      statusCode = 400;
+      errorMessage = 'Duplicate bill number. Please try again.';
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+    
+    res.status(statusCode).json({ 
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
