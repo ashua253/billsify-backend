@@ -205,6 +205,7 @@ router.get('/inventory/search', authenticateToken, checkAffiliate, async (req, r
 // ============ CUSTOMER BILL ROUTES ============
 
 // FIXED: Create customer bill with enhanced error handling and validation
+// FIXED: Create customer bill route with manual field calculation
 router.post('/bills', authenticateToken, checkAffiliate, async (req, res) => {
   try {
     const {
@@ -312,13 +313,54 @@ router.post('/bills', authenticateToken, checkAffiliate, async (req, res) => {
       }
     }
 
-    // ENHANCED: Process items with validation and proper number conversion
+    // FIXED: Generate bill number manually
+    console.log('📝 Generating bill number...');
+    const date = new Date();
+    const dateStr = date.getFullYear().toString() +
+                   (date.getMonth() + 1).toString().padStart(2, '0') +
+                   date.getDate().toString().padStart(2, '0');
+    
+    let billNumber;
+    try {
+      // Try to find the last bill number for today
+      const lastBill = await CustomerBill.findOne({
+        billNumber: new RegExp(`^BILL${dateStr}`)
+      }).sort({ billNumber: -1 });
+      
+      let sequence = 1;
+      if (lastBill && lastBill.billNumber) {
+        const lastSequence = parseInt(lastBill.billNumber.slice(-4));
+        if (!isNaN(lastSequence)) {
+          sequence = lastSequence + 1;
+        }
+      }
+      
+      billNumber = `BILL${dateStr}${sequence.toString().padStart(4, '0')}`;
+      console.log('✅ Generated bill number:', billNumber);
+      
+    } catch (billNumberError) {
+      console.error('❌ Error generating sequential bill number:', billNumberError);
+      // Fallback to random number
+      const randomSequence = Math.floor(Math.random() * 9999) + 1;
+      billNumber = `BILL${dateStr}${randomSequence.toString().padStart(4, '0')}`;
+      console.log('⚠️ Using fallback bill number:', billNumber);
+    }
+
+    // FIXED: Process items and calculate totals manually
+    console.log('💰 Processing items and calculating totals...');
+    let itemSubtotal = 0;
+    let totalItemDiscounts = 0;
+    
     const processedItems = items.map((item, index) => {
       const quantity = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unitPrice);
       const itemDiscount = parseFloat(item.discount || 0);
       const grossAmount = quantity * unitPrice;
       const netAmount = Math.max(0, grossAmount - itemDiscount);
+
+      // Add to running totals
+      itemSubtotal += grossAmount;
+      totalItemDiscounts += itemDiscount;
 
       const processedItem = {
         itemName: item.itemName.trim(),
@@ -340,38 +382,53 @@ router.post('/bills', authenticateToken, checkAffiliate, async (req, res) => {
       return processedItem;
     });
 
-    // Validate discount amount
+    // Calculate final totals
     const additionalDiscount = parseFloat(discountAmount || 0);
-    if (isNaN(additionalDiscount) || additionalDiscount < 0) {
-      return res.status(400).json({ 
-        error: 'Additional discount cannot be negative' 
-      });
-    }
+    const finalTotal = Math.max(0, itemSubtotal - totalItemDiscounts - additionalDiscount);
+    
+    console.log('💰 Final calculations:', {
+      subtotal: itemSubtotal,
+      totalItemDiscounts: totalItemDiscounts,
+      additionalDiscount: additionalDiscount,
+      finalTotal: finalTotal
+    });
 
-    console.log('📝 Creating CustomerBill document...');
+    console.log('📝 Creating CustomerBill document with all required fields...');
 
-    // Create customer bill with all required data
+    // FIXED: Create customer bill with ALL required fields pre-calculated
     const customerBillData = {
+      // Required fields (pre-calculated)
+      billNumber: billNumber,
+      subtotal: itemSubtotal,
+      totalAmount: finalTotal,
+      totalItemDiscounts: totalItemDiscounts,
+      
+      // Other required fields
       affiliateId: req.user.userId,
       customerPhoneNumber: customerPhoneNumber.trim(),
-      customerName: customerName?.trim() || '',
       items: processedItems,
+      
+      // Optional fields
+      customerName: customerName?.trim() || '',
       discountAmount: additionalDiscount,
       remarks: remarks?.trim() || '',
       paymentMethod: paymentMethod || 'pending',
-      status: 'sent'
+      status: 'sent',
+      billDate: new Date()
     };
 
-    console.log('💾 CustomerBill data prepared:', {
+    console.log('💾 CustomerBill data with required fields:', {
+      billNumber: customerBillData.billNumber,
+      subtotal: customerBillData.subtotal,
+      totalAmount: customerBillData.totalAmount,
       affiliateId: customerBillData.affiliateId,
-      customerPhoneNumber: customerBillData.customerPhoneNumber,
-      itemsCount: customerBillData.items.length,
-      discountAmount: customerBillData.discountAmount
+      itemsCount: customerBillData.items.length
     });
 
+    // Create and save the bill (pre-save middleware should not be needed)
     const customerBill = new CustomerBill(customerBillData);
 
-    console.log('💾 Attempting to save CustomerBill...');
+    console.log('💾 Attempting to save CustomerBill with pre-calculated fields...');
     const savedBill = await customerBill.save();
 
     console.log('✅ Bill created successfully:', {
@@ -422,7 +479,21 @@ router.post('/bills', authenticateToken, checkAffiliate, async (req, res) => {
     }
 
     // Return bill with breakdown
-    const billBreakdown = savedBill.getBillBreakdown();
+    const billBreakdown = {
+      items: savedBill.items.map(item => ({
+        name: item.itemName,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        grossAmount: item.quantity * item.unitPrice,
+        itemDiscount: item.discount || 0,
+        netAmount: item.totalPrice
+      })),
+      subtotal: savedBill.subtotal,
+      totalItemDiscounts: savedBill.totalItemDiscounts,
+      additionalDiscount: savedBill.discountAmount || 0,
+      totalDiscounts: savedBill.totalItemDiscounts + (savedBill.discountAmount || 0),
+      finalTotal: savedBill.totalAmount
+    };
 
     console.log('🎉 Bill creation completed successfully');
 
@@ -455,6 +526,7 @@ router.post('/bills', authenticateToken, checkAffiliate, async (req, res) => {
       statusCode = 400;
       const errorMessages = Object.values(error.errors).map(err => err.message);
       errorMessage = `Validation failed: ${errorMessages.join(', ')}`;
+      console.error('❌ Validation error details:', error.errors);
     } else if (error.name === 'MongoServerError' && error.code === 11000) {
       statusCode = 400;
       errorMessage = 'Duplicate bill number. Please try again.';
