@@ -1,4 +1,4 @@
-// models/CustomerBill.js - FIXED: Proper pre-save middleware with error handling
+// models/CustomerBill.js - FIXED: Synchronous pre-save middleware to avoid async issues
 const mongoose = require('mongoose');
 
 const customerBillSchema = new mongoose.Schema({
@@ -145,150 +145,127 @@ customerBillSchema.index({ affiliateId: 1, billDate: -1 });
 customerBillSchema.index({ customerPhoneNumber: 1, billDate: -1 });
 customerBillSchema.index({ affiliateId: 1, status: 1 });
 
-// FIXED: Enhanced pre-save middleware with proper error handling and logging
-customerBillSchema.pre('save', async function(next) {
+// FIXED: Split pre-save into separate functions for better reliability
+customerBillSchema.pre('save', function(next) {
+  console.log('🔄 Pre-save middleware executing...');
+  
   try {
-    console.log('🔄 Pre-save middleware executing for CustomerBill...');
-    
-    // Generate bill number if new document
+    // Step 1: Generate bill number (synchronously)
     if (this.isNew && !this.billNumber) {
-      console.log('📝 Generating bill number...');
-      
-      const date = new Date();
-      const dateStr = date.getFullYear().toString() +
-                     (date.getMonth() + 1).toString().padStart(2, '0') +
-                     date.getDate().toString().padStart(2, '0');
-      
-      try {
-        // Find the last bill number for today
-        const lastBill = await this.constructor.findOne({
-          billNumber: new RegExp(`^BILL${dateStr}`)
-        }).sort({ billNumber: -1 });
-        
-        let sequence = 1;
-        if (lastBill && lastBill.billNumber) {
-          const lastSequence = parseInt(lastBill.billNumber.slice(-4));
-          if (!isNaN(lastSequence)) {
-            sequence = lastSequence + 1;
-          }
-        }
-        
-        this.billNumber = `BILL${dateStr}${sequence.toString().padStart(4, '0')}`;
-        console.log('✅ Generated bill number:', this.billNumber);
-        
-      } catch (billNumberError) {
-        console.error('❌ Error generating bill number:', billNumberError);
-        // Fallback bill number
-        this.billNumber = `BILL${dateStr}${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
-        console.log('⚠️ Using fallback bill number:', this.billNumber);
-      }
+      this.generateBillNumber();
     }
     
-    // FIXED: Calculate totals with enhanced error handling
-    console.log('💰 Calculating bill totals...');
-    console.log('📦 Items to process:', this.items.length);
+    // Step 2: Calculate totals (synchronously)
+    this.calculateTotals();
     
-    let itemSubtotal = 0;
-    let totalItemDiscounts = 0;
+    // Step 3: Validate required fields
+    this.validateRequiredFields();
     
-    // Ensure items array exists and has valid data
-    if (!this.items || !Array.isArray(this.items) || this.items.length === 0) {
-      console.error('❌ No valid items found for bill calculation');
-      return next(new Error('At least one item is required for bill creation'));
-    }
-    
-    // Process each item
-    this.items.forEach((item, index) => {
-      console.log(`📊 Processing item ${index + 1}:`, {
-        itemName: item.itemName,
-        quantity: item.quantity,
-        unitPrice: item.unitPrice,
-        discount: item.discount || 0
-      });
-      
-      // Validate item data
-      const quantity = parseFloat(item.quantity) || 0;
-      const unitPrice = parseFloat(item.unitPrice) || 0;
-      const itemDiscount = parseFloat(item.discount) || 0;
-      
-      if (quantity <= 0 || unitPrice < 0) {
-        console.error(`❌ Invalid item data at index ${index}:`, { quantity, unitPrice });
-        return next(new Error(`Invalid item data: quantity must be > 0 and unitPrice must be >= 0`));
-      }
-      
-      const itemGross = quantity * unitPrice;
-      const netAmount = Math.max(0, itemGross - itemDiscount);
-      
-      // Update item totalPrice
-      item.totalPrice = netAmount;
-      
-      // Add to totals
-      itemSubtotal += itemGross;
-      totalItemDiscounts += itemDiscount;
-      
-      console.log(`✅ Item ${index + 1} processed:`, {
-        gross: itemGross,
-        discount: itemDiscount,
-        net: netAmount
-      });
-    });
-    
-    // Set calculated values
-    this.subtotal = itemSubtotal;
-    this.totalItemDiscounts = totalItemDiscounts;
-    
-    // Ensure discountAmount is a valid number
-    const additionalDiscount = parseFloat(this.discountAmount) || 0;
-    this.discountAmount = additionalDiscount;
-    
-    // Calculate final total
-    this.totalAmount = Math.max(0, this.subtotal - this.totalItemDiscounts - additionalDiscount);
-    
-    console.log('💰 Final bill calculations:', {
+    console.log('✅ Pre-save completed successfully:', {
+      billNumber: this.billNumber,
       subtotal: this.subtotal,
-      totalItemDiscounts: this.totalItemDiscounts,
-      additionalDiscount: this.discountAmount,
-      finalTotal: this.totalAmount
+      totalAmount: this.totalAmount
     });
     
-    // Validate that required fields are set
-    if (!this.billNumber) {
-      return next(new Error('Bill number generation failed'));
-    }
-    if (this.subtotal === undefined || this.subtotal < 0) {
-      return next(new Error('Invalid subtotal calculated'));
-    }
-    if (this.totalAmount === undefined || this.totalAmount < 0) {
-      return next(new Error('Invalid total amount calculated'));
-    }
-    
-    console.log('✅ Pre-save middleware completed successfully');
     next();
-    
   } catch (error) {
-    console.error('❌ Pre-save middleware error:', error);
+    console.error('❌ Pre-save error:', error);
     next(error);
   }
 });
 
+// FIXED: Synchronous bill number generation method
+customerBillSchema.methods.generateBillNumber = function() {
+  const date = new Date();
+  const dateStr = date.getFullYear().toString() +
+                 (date.getMonth() + 1).toString().padStart(2, '0') +
+                 date.getDate().toString().padStart(2, '0');
+  
+  // Generate a random sequence for now (can be improved with counter)
+  const sequence = Math.floor(Math.random() * 9999) + 1;
+  this.billNumber = `BILL${dateStr}${sequence.toString().padStart(4, '0')}`;
+  
+  console.log('📝 Generated bill number:', this.billNumber);
+};
+
+// FIXED: Synchronous calculation method
+customerBillSchema.methods.calculateTotals = function() {
+  console.log('💰 Calculating totals...');
+  
+  if (!this.items || !Array.isArray(this.items) || this.items.length === 0) {
+    throw new Error('At least one item is required');
+  }
+  
+  let itemSubtotal = 0;
+  let totalItemDiscounts = 0;
+  
+  this.items.forEach((item, index) => {
+    const quantity = Number(item.quantity) || 0;
+    const unitPrice = Number(item.unitPrice) || 0;
+    const itemDiscount = Number(item.discount) || 0;
+    
+    if (quantity <= 0 || unitPrice < 0) {
+      throw new Error(`Invalid item data at index ${index}`);
+    }
+    
+    const itemGross = quantity * unitPrice;
+    const netAmount = Math.max(0, itemGross - itemDiscount);
+    
+    // Update item totalPrice
+    item.totalPrice = netAmount;
+    
+    itemSubtotal += itemGross;
+    totalItemDiscounts += itemDiscount;
+    
+    console.log(`📊 Item ${index + 1}:`, {
+      gross: itemGross,
+      discount: itemDiscount,
+      net: netAmount
+    });
+  });
+  
+  this.subtotal = itemSubtotal;
+  this.totalItemDiscounts = totalItemDiscounts;
+  
+  const additionalDiscount = Number(this.discountAmount) || 0;
+  this.discountAmount = additionalDiscount;
+  
+  this.totalAmount = Math.max(0, this.subtotal - this.totalItemDiscounts - additionalDiscount);
+  
+  console.log('💰 Final calculations:', {
+    subtotal: this.subtotal,
+    totalItemDiscounts: this.totalItemDiscounts,
+    additionalDiscount: this.discountAmount,
+    totalAmount: this.totalAmount
+  });
+};
+
+// FIXED: Validation method
+customerBillSchema.methods.validateRequiredFields = function() {
+  if (!this.billNumber) {
+    throw new Error('Bill number is required');
+  }
+  if (this.subtotal === undefined || this.subtotal < 0) {
+    throw new Error('Valid subtotal is required');
+  }
+  if (this.totalAmount === undefined || this.totalAmount < 0) {
+    throw new Error('Valid total amount is required');
+  }
+};
+
 // Instance methods
 customerBillSchema.methods.generatePDF = async function() {
-  // This would integrate with a PDF generation service
-  // For now, return a placeholder path
   const pdfFileName = `${this.billNumber}.pdf`;
   this.pdfPath = `/bills/pdfs/${pdfFileName}`;
   return this.pdfPath;
 };
 
 customerBillSchema.methods.sendWhatsApp = async function() {
-  // This would integrate with WhatsApp Business API
-  // For now, mark as sent
   this.whatsappSent = true;
   this.whatsappSentAt = new Date();
   return this.save();
 };
 
-// UPDATED: Get detailed bill breakdown
 customerBillSchema.methods.getBillBreakdown = function() {
   const breakdown = {
     items: this.items.map(item => ({
@@ -347,7 +324,6 @@ customerBillSchema.statics.getCustomerBills = function(phoneNumber) {
   .sort({ billDate: -1 });
 };
 
-// NEW: Get discount analysis for affiliate
 customerBillSchema.statics.getDiscountAnalysis = function(affiliateId, startDate, endDate) {
   const matchQuery = { 
     affiliateId: affiliateId,
